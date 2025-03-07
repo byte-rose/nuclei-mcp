@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Playwright MCP Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #counter {
+            font-size: 24px;
+            margin: 10px 0;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Page</h1>
+    <div id="counter">Count: <span id="count">0</span></div>
+    <button id="increment">Increment</button>
+
+    <script>
+        let count = 0;
+        const countDisplay = document.getElementById('count');
+        const button = document.getElementById('increment');
+        
+        button.addEventListener('click', () => {
+            count++;
+            countDisplay.textContent = count;
+        });
+    </script>
+</body>
+</html>

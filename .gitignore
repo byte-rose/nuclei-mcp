@@ -1,0 +1,59 @@
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+/Godeps/
+
+# Go workspace file
+go.work
+
+# Build
+*.o
+*.a
+/build/
+/dist/
+/bin/
+
+# Test binary, built with 'go test -c'
+*.test
+
+# Output of the go coverage tool
+*.cover
+*.out
+
+# Dependencies
+/vendor/
+/go.sum
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# Debugging
+__debug_bin
+debug.test
+
+# System files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Log files
+*.log
+logs/
