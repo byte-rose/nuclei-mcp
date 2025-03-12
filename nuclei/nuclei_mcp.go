@@ -1,119 +1,30 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
-	"github.com/strowk/foxy-contexts/pkg/app"
-	"github.com/strowk/foxy-contexts/pkg/fxctx"
-	"github.com/strowk/foxy-contexts/pkg/mcp"
-	"github.com/strowk/foxy-contexts/pkg/stdio"
-	"go.uber.org/fx"
-	"go.uber.org/fx/fxevent"
-	"go.uber.org/zap"
 )
-
-// ===== Configuration =====
-
-// Config holds all configuration parameters
-type Config struct {
-	LogLevel    string        `env:"LOG_LEVEL" envDefault:"info"`
-	MaxWorkers  int           `env:"MAX_WORKERS" envDefault:"5"`
-	UsePassive  bool          `env:"USE_PASSIVE" envDefault:"false"`
-	CacheExpiry time.Duration `env:"CACHE_EXPIRY" envDefault:"5m"`
-}
-
-// ===== Scanner Pool =====
-
-// ScannerPool maintains a pool of nuclei engines
-type ScannerPool struct {
-	scanners chan *nuclei.NucleiEngine
-	size     int
-	lock     sync.Mutex
-	logger   *zap.Logger
-}
-
-// NewScannerPool creates a new scanner pool
-func NewScannerPool(size int, logger *zap.Logger) *ScannerPool {
-	logger.Info("Initializing scanner pool", zap.Int("size", size))
-
-	pool := &ScannerPool{
-		scanners: make(chan *nuclei.NucleiEngine, size),
-		size:     size,
-		logger:   logger,
-	}
-
-	// Initialize scanners
-	for i := 0; i < size; i++ {
-		options := []nuclei.NucleiSDKOptions{}
-		scanner, err := nuclei.NewNucleiEngine(options...)
-		if err != nil {
-			logger.Error("Failed to create scanner", zap.Int("index", i), zap.Error(err))
-			continue
-		}
-		pool.scanners <- scanner
-	}
-
-	return pool
-}
-
-// Get retrieves a scanner from the pool
-func (p *ScannerPool) Get() (*nuclei.NucleiEngine, error) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	select {
-	case scanner := <-p.scanners:
-		return scanner, nil
-	default:
-		p.logger.Warn("Scanner pool exhausted, creating new scanner")
-		scanner, err := nuclei.NewNucleiEngine()
-		if err != nil {
-			return nil, err
-		}
-		return scanner, nil
-	}
-}
-
-// Put returns a scanner to the pool
-func (p *ScannerPool) Put(scanner *nuclei.NucleiEngine) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	select {
-	case p.scanners <- scanner:
-		// Scanner returned to pool
-	default:
-		p.logger.Warn("Scanner pool full, closing scanner")
-		scanner.Close()
-	}
-}
-
-// Close closes all scanners in the pool
-func (p *ScannerPool) Close() {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	close(p.scanners)
-	for scanner := range p.scanners {
-		scanner.Close()
-	}
-}
-
-// ===== Result Cache =====
 
 // ScanResult represents the result of a nuclei scan
 type ScanResult struct {
-	Target   string
-	Findings []*output.ResultEvent
-	ScanTime time.Time
+	Target   string                `json:"target"`
+	ScanTime time.Time             `json:"scan_time"`
+	Findings []*output.ResultEvent `json:"findings"`
 }
 
 // ResultCache caches scan results
@@ -121,11 +32,11 @@ type ResultCache struct {
 	cache  map[string]ScanResult
 	expiry time.Duration
 	lock   sync.RWMutex
-	logger *zap.Logger
+	logger *log.Logger
 }
 
 // NewResultCache creates a new result cache
-func NewResultCache(expiry time.Duration, logger *zap.Logger) *ResultCache {
+func NewResultCache(expiry time.Duration, logger *log.Logger) *ResultCache {
 	return &ResultCache{
 		cache:  make(map[string]ScanResult),
 		expiry: expiry,
@@ -145,11 +56,11 @@ func (c *ResultCache) Get(key string) (ScanResult, bool) {
 
 	// Check if result has expired
 	if time.Since(result.ScanTime) > c.expiry {
-		c.logger.Debug("Cache entry expired", zap.String("key", key))
+		c.logger.Printf("Cache entry expired: %s", key)
 		return ScanResult{}, false
 	}
 
-	c.logger.Debug("Cache hit", zap.String("key", key))
+	c.logger.Printf("Cache hit: %s", key)
 	return result, true
 }
 
@@ -159,22 +70,18 @@ func (c *ResultCache) Set(key string, result ScanResult) {
 	defer c.lock.Unlock()
 
 	c.cache[key] = result
-	c.logger.Debug("Cache entry set", zap.String("key", key))
+	c.logger.Printf("Cache entry set: %s", key)
 }
-
-// ===== Nuclei Scanner Service =====
 
 // ScannerService provides nuclei scanning operations
 type ScannerService struct {
-	pool   *ScannerPool
 	cache  *ResultCache
-	logger *zap.Logger
+	logger *log.Logger
 }
 
 // NewScannerService creates a new scanner service
-func NewScannerService(pool *ScannerPool, cache *ResultCache, logger *zap.Logger) *ScannerService {
+func NewScannerService(cache *ResultCache, logger *log.Logger) *ScannerService {
 	return &ScannerService{
-		pool:   pool,
 		cache:  cache,
 		logger: logger,
 	}
@@ -186,337 +93,644 @@ func (s *ScannerService) CreateCacheKey(target string, severity string, protocol
 }
 
 // Scan performs a nuclei scan
-func (s *ScannerService) Scan(target string, severity string, protocols string) (ScanResult, error) {
+func (s *ScannerService) Scan(target string, severity string, protocols string, templateIDs []string) (ScanResult, error) {
 	// Create cache key
 	cacheKey := s.CreateCacheKey(target, severity, protocols)
+	if len(templateIDs) > 0 {
+		cacheKey += ":" + strings.Join(templateIDs, ",")
+	}
 
 	// Check cache first
 	if result, found := s.cache.Get(cacheKey); found {
-		s.logger.Info("Returning cached scan result",
-			zap.String("target", target),
-			zap.Int("findings", len(result.Findings)))
+		s.logger.Printf("Returning cached scan result for %s (%d findings)", 
+			target, len(result.Findings))
 		return result, nil
 	}
 
-	// Get scanner from pool
-	s.logger.Info("Starting new scan", zap.String("target", target))
-	scanner, err := s.pool.Get()
+	s.logger.Printf("Starting new scan for target: %s", target)
+
+	// Create a new nuclei engine for this scan
+	options := []nuclei.NucleiSDKOptions{
+		nuclei.DisableUpdateCheck(),
+	}
+	
+	// Add template filters if provided
+	if severity != "" || protocols != "" || len(templateIDs) > 0 {
+		filters := nuclei.TemplateFilters{}
+		
+		if severity != "" {
+			filters.Severity = severity
+		}
+		
+		if protocols != "" {
+			protocolsList := strings.Split(protocols, ",")
+			var validProtocols []string
+			for _, p := range protocolsList {
+				p = strings.TrimSpace(p)
+				if p != "https" { 
+					validProtocols = append(validProtocols, p)
+				}
+			}
+			if len(validProtocols) > 0 {
+				filters.ProtocolTypes = strings.Join(validProtocols, ",")
+			}
+		}
+		
+		if len(templateIDs) > 0 {
+			filters.IDs = templateIDs
+		}
+		
+		options = append(options, nuclei.WithTemplateFilters(filters))
+	}
+	
+	// Create the engine with options
+	ne, err := nuclei.NewNucleiEngine(options...)
 	if err != nil {
-		return ScanResult{}, fmt.Errorf("failed to get scanner: %v", err)
+		s.logger.Printf("Failed to create nuclei engine: %v", err)
+		return ScanResult{}, err
 	}
-	defer s.pool.Put(scanner)
+	defer ne.Close()
 
-	// Create options
-	options := []nuclei.NucleiSDKOptions{}
-	if severity != "" {
-		options = append(options, nuclei.WithTemplateFilters(nuclei.TemplateFilters{
-			Severity: severity,
-		}))
-	}
-	if protocols != "" {
-		options = append(options, nuclei.WithTemplateFilters(nuclei.TemplateFilters{
-			ProtocolTypes: protocols,
-		}))
+	// Load targets
+	ne.LoadTargets([]string{target}, true)
+	
+	// Ensure templates are loaded
+	if err := ne.LoadAllTemplates(); err != nil {
+		s.logger.Printf("Failed to load templates: %v", err)
+		return ScanResult{}, err
 	}
 
-	// Store scan results
-	var scanResults []*output.ResultEvent
+	// Collect results
+	var findings []*output.ResultEvent
+	var findingsMutex sync.Mutex
 
-	// Load target and execute scan
-	scanner.LoadTargets([]string{target}, false)
-	err = scanner.ExecuteWithCallback(func(event *output.ResultEvent) {
-		s.logger.Debug("Found vulnerability",
-			zap.String("name", event.Info.Name),
-			zap.String("host", event.Host))
-		scanResults = append(scanResults, event)
-	})
+	// Callback for results
+	callback := func(event *output.ResultEvent) {
+		findingsMutex.Lock()
+		defer findingsMutex.Unlock()
+		findings = append(findings, event)
+		s.logger.Printf("Found vulnerability: %s (%s) on %s", 
+			event.Info.Name, 
+			event.Info.SeverityHolder.Severity.String(), 
+			event.Host)
+	}
 
+	// Execute scan with callback
+	err = ne.ExecuteWithCallback(callback)
 	if err != nil {
-		return ScanResult{}, fmt.Errorf("scan execution failed: %v", err)
+		s.logger.Printf("Scan failed: %v", err)
+		return ScanResult{}, err
 	}
 
 	// Create result
 	result := ScanResult{
 		Target:   target,
-		Findings: scanResults,
+		Findings: findings,
 		ScanTime: time.Now(),
 	}
 
 	// Cache result
 	s.cache.Set(cacheKey, result)
 
-	s.logger.Info("Scan completed",
-		zap.String("target", target),
-		zap.Int("findings", len(scanResults)))
+	s.logger.Printf("Scan completed for %s, found %d vulnerabilities", 
+		target, len(findings))
 
 	return result, nil
 }
 
-// ===== Nuclei MCP Tool =====
-
-// NewNucleiScanTool creates a nuclei scan MCP tool
-func NewNucleiScanTool(service *ScannerService, logger *zap.Logger) fxctx.Tool {
-	return fxctx.NewTool(
-		&mcp.Tool{
-			Name:        "nuclei-scan",
-			Description: ptr("Execute a Nuclei vulnerability scan against a target"),
-			InputSchema: mcp.ToolInputSchema{
-				Type: "object",
-				Properties: map[string]map[string]interface{}{
-					"target": {
-						"type":        "string",
-						"description": "URL or IP to scan (e.g., scanme.sh)",
-					},
-					"severity": {
-						"type":        "string",
-						"description": "Filter templates by severity",
-						"enum":        []interface{}{"info", "low", "medium", "high", "critical"},
-					},
-					"protocols": {
-						"type":        "string",
-						"description": "Filter templates by protocol (e.g., http, dns)",
-					},
-				},
-				Required: []string{"target"},
-			},
-		},
-		func(args map[string]interface{}) *mcp.CallToolResult {
-			logger.Info("Nuclei scan requested", zap.Any("args", args))
-
-			// Extract parameters
-			target, _ := args["target"].(string)
-			if target == "" {
-				logger.Warn("Missing target parameter")
-				return &mcp.CallToolResult{
-					IsError: ptr(true),
-					Content: []interface{}{
-						mcp.TextContent{
-							Type: "text",
-							Text: "Target URL or IP is required",
-						},
-					},
-				}
-			}
-
-			severity, _ := args["severity"].(string)
-			protocols, _ := args["protocols"].(string)
-
-			// Perform scan
-			result, err := service.Scan(target, severity, protocols)
-			if err != nil {
-				logger.Error("Scan failed", zap.Error(err))
-				return &mcp.CallToolResult{
-					IsError: ptr(true),
-					Content: []interface{}{
-						mcp.TextContent{
-							Type: "text",
-							Text: fmt.Sprintf("Scan execution failed: %v", err),
-						},
-					},
-				}
-			}
-
-			if len(result.Findings) == 0 {
-				logger.Info("No vulnerabilities found", zap.String("target", target))
-				return &mcp.CallToolResult{
-					Content: []interface{}{
-						mcp.TextContent{
-							Type: "text",
-							Text: fmt.Sprintf("No vulnerabilities found for target: %s", target),
-						},
-					},
-				}
-			}
-
-			// Format results for LLM consumption
-			logger.Info("Formatting scan results", zap.Int("count", len(result.Findings)))
-			formattedResults := make([]interface{}, len(result.Findings))
-			for i, finding := range result.Findings {
-				resultInfo := map[string]interface{}{
-					"name":        finding.Info.Name,
-					"description": finding.Info.Description,
-					"template_id": finding.TemplateID,
-					"matched_at":  finding.MatcherName,
-					"host":        finding.Host,
-					"timestamp":   finding.Timestamp,
-				}
-
-				jsonData, err := json.Marshal(resultInfo)
-				if err != nil {
-					logger.Error("Failed to marshal result", zap.Error(err))
-					jsonData = []byte(fmt.Sprintf("Error formatting result: %v", err))
-				}
-
-				formattedResults[i] = mcp.TextContent{
-					Type: "text",
-					Text: string(jsonData),
-				}
-			}
-
-			return &mcp.CallToolResult{
-				Meta: map[string]interface{}{
-					"total_findings": len(result.Findings),
-					"target":         target,
-				},
-				Content: formattedResults,
-			}
-		},
-	)
-}
-
-// ===== Resource Providers =====
-
-// VulnerabilityReportsProvider implements a resource provider for vulnerability reports
-type VulnerabilityReportsProvider struct {
-	service       *ScannerService
-	logger        *zap.Logger
-	recentResults []ScanResult
-	lock          sync.RWMutex
-}
-
-// NewVulnerabilityReportsProvider creates a new vulnerability reports provider
-func NewVulnerabilityReportsProvider(service *ScannerService, logger *zap.Logger) *VulnerabilityReportsProvider {
-	return &VulnerabilityReportsProvider{
-		service:       service,
-		logger:        logger,
-		recentResults: make([]ScanResult, 0),
+// ThreadSafeScan performs a thread-safe nuclei scan
+func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, severity string, protocols string, templateIDs []string) (ScanResult, error) {
+	// Create cache key
+	cacheKey := s.CreateCacheKey(target, severity, protocols)
+	if len(templateIDs) > 0 {
+		cacheKey += ":" + strings.Join(templateIDs, ",")
 	}
-}
 
-// AddResult adds a scan result to the recent results
-func (p *VulnerabilityReportsProvider) AddResult(result ScanResult) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	// Keep only the latest 10 results
-	if len(p.recentResults) >= 10 {
-		p.recentResults = p.recentResults[1:]
+	// Check cache first
+	if result, found := s.cache.Get(cacheKey); found {
+		s.logger.Printf("Returning cached scan result for %s (%d findings)", 
+			target, len(result.Findings))
+		return result, nil
 	}
-	p.recentResults = append(p.recentResults, result)
-}
 
-// GetResource implements the resource provider interface
-func (p *VulnerabilityReportsProvider) GetResource(uri string) (*mcp.ReadResourceResult, error) {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
+	s.logger.Printf("Starting new thread-safe scan for target: %s", target)
 
-	results := make([]map[string]interface{}, 0)
-	for _, result := range p.recentResults {
-		resultMap := map[string]interface{}{
-			"target":    result.Target,
-			"findings":  len(result.Findings),
-			"scan_time": result.ScanTime,
+	// Create options for the thread-safe engine
+	options := []nuclei.NucleiSDKOptions{
+		nuclei.DisableUpdateCheck(),
+	}
+	
+	// Add template filters if provided
+	if severity != "" || protocols != "" || len(templateIDs) > 0 {
+		filters := nuclei.TemplateFilters{}
+		
+		if severity != "" {
+			filters.Severity = severity
 		}
-		results = append(results, resultMap)
+		
+		if protocols != "" {
+			protocolsList := strings.Split(protocols, ",")
+			var validProtocols []string
+			for _, p := range protocolsList {
+				p = strings.TrimSpace(p)
+				if p != "https" { 
+					validProtocols = append(validProtocols, p)
+				}
+			}
+			if len(validProtocols) > 0 {
+				filters.ProtocolTypes = strings.Join(validProtocols, ",")
+			}
+		}
+		
+		if len(templateIDs) > 0 {
+			filters.IDs = templateIDs
+		}
+		
+		options = append(options, nuclei.WithTemplateFilters(filters))
 	}
-
-	data, err := json.Marshal(results)
+	
+	// Create a new thread-safe nuclei engine
+	ne, err := nuclei.NewThreadSafeNucleiEngineCtx(ctx, options...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal results: %w", err)
+		s.logger.Printf("Failed to create thread-safe nuclei engine: %v", err)
+		return ScanResult{}, err
+	}
+	defer ne.Close()
+
+	// Collect results
+	var findings []*output.ResultEvent
+	var findingsMutex sync.Mutex
+
+	// Set up callback for results
+	ne.GlobalResultCallback(func(event *output.ResultEvent) {
+		findingsMutex.Lock()
+		defer findingsMutex.Unlock()
+		findings = append(findings, event)
+		s.logger.Printf("Found vulnerability: %s (%s) on %s", 
+			event.Info.Name, 
+			event.Info.SeverityHolder.Severity.String(), 
+			event.Host)
+	})
+
+	// Execute scan with options
+	err = ne.ExecuteNucleiWithOptsCtx(ctx, []string{target}, options...)
+	if err != nil {
+		s.logger.Printf("Thread-safe scan failed: %v", err)
+		return ScanResult{}, err
 	}
 
-	return &mcp.ReadResourceResult{
-		Contents: []interface{}{
-			mcp.TextResourceContents{
-				MimeType: ptr("application/json"),
-				Text:     string(data),
-				Uri:      uri,
-			},
+	// Create result
+	result := ScanResult{
+		Target:   target,
+		Findings: findings,
+		ScanTime: time.Now(),
+	}
+
+	// Cache result
+	s.cache.Set(cacheKey, result)
+
+	s.logger.Printf("Thread-safe scan completed for %s, found %d vulnerabilities", 
+		target, len(findings))
+
+	return result, nil
+}
+
+// BasicScan performs a simple nuclei scan without requiring template IDs
+func (s *ScannerService) BasicScan(target string) (ScanResult, error) {
+	// Create cache key for basic scan
+	cacheKey := fmt.Sprintf("basic:%s", target)
+
+	// Check cache first
+	if result, found := s.cache.Get(cacheKey); found {
+		s.logger.Printf("Returning cached basic scan result for %s (%d findings)", 
+			target, len(result.Findings))
+		return result, nil
+	}
+
+	s.logger.Printf("Starting new basic scan for target: %s", target)
+
+	// Ensure templates directory exists and is absolute path
+	templatesDir, err := filepath.Abs("./templates")
+	if err != nil {
+		s.logger.Printf("Failed to get absolute path for templates directory: %v", err)
+		return ScanResult{}, err
+	}
+	
+	if _, err := os.Stat(templatesDir); os.IsNotExist(err) {
+		// Create templates directory if it doesn't exist
+		s.logger.Printf("Creating templates directory: %s", templatesDir)
+		if err := os.MkdirAll(templatesDir, 0755); err != nil {
+			s.logger.Printf("Failed to create templates directory: %v", err)
+			return ScanResult{}, err
+		}
+	}
+	
+	// Create a basic template file path
+	basicTemplatePath := filepath.Join(templatesDir, "basic-test.yaml")
+	
+	// Check if basic template exists, create it if not
+	if _, err := os.Stat(basicTemplatePath); os.IsNotExist(err) {
+		// Create a basic template for testing
+		basicTemplate := `id: basic-test
+info:
+  name: Basic Test Template
+  author: MCP
+  severity: info
+  description: Basic test template for nuclei
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    matchers:
+      - type: status
+        status:
+          - 200
+`
+		// Write basic template to file
+		s.logger.Printf("Creating basic template: %s", basicTemplatePath)
+		if err := os.WriteFile(basicTemplatePath, []byte(basicTemplate), 0644); err != nil {
+			s.logger.Printf("Failed to write basic template: %v", err)
+			return ScanResult{}, err
+		}
+	}
+
+	// Create nuclei options with specific template and config
+	opts := []nuclei.NucleiSDKOptions{
+		nuclei.WithTemplateFilters(nuclei.TemplateFilters{
+			IncludeTags: []string{"basic-test"},
+			IDs: []string{"basic-test"},
+		}),
+		nuclei.DisableUpdateCheck(),
+	}
+
+	// Create a new nuclei engine with our options
+	ne, err := nuclei.NewNucleiEngine(opts...)
+	if err != nil {
+		s.logger.Printf("Failed to create nuclei engine: %v", err)
+		return ScanResult{}, err
+	}
+	defer ne.Close()
+
+	// Load targets
+	ne.LoadTargets([]string{target}, true)
+	
+	// Collect results
+	var findings []*output.ResultEvent
+	var findingsMutex sync.Mutex
+
+	// Callback for results
+	callback := func(event *output.ResultEvent) {
+		findingsMutex.Lock()
+		defer findingsMutex.Unlock()
+		findings = append(findings, event)
+		s.logger.Printf("Found vulnerability: %s (%s) on %s", 
+			event.Info.Name, 
+			event.Info.SeverityHolder.Severity.String(), 
+			event.Host)
+	}
+
+	// Execute scan with callback
+	err = ne.ExecuteWithCallback(callback)
+	if err != nil {
+		s.logger.Printf("Basic scan failed: %v", err)
+		return ScanResult{}, err
+	}
+
+	// Create result
+	result := ScanResult{
+		Target:   target,
+		Findings: findings,
+		ScanTime: time.Now(),
+	}
+
+	// Cache result
+	s.cache.Set(cacheKey, result)
+
+	s.logger.Printf("Basic scan completed for %s, found %d vulnerabilities", 
+		target, len(findings))
+
+	return result, nil
+}
+
+// handleNucleiScanTool handles the nuclei_scan tool requests
+func handleNucleiScanTool(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+	service *ScannerService,
+	logger *log.Logger,
+) (*mcp.CallToolResult, error) {
+	arguments := request.Params.Arguments
+	
+	// Extract parameters
+	target, ok := arguments["target"].(string)
+	if !ok || target == "" {
+		return nil, fmt.Errorf("invalid or missing target parameter")
+	}
+	
+	severity, _ := arguments["severity"].(string)
+	if severity == "" {
+		severity = "info"
+	}
+	
+	protocols, _ := arguments["protocols"].(string)
+	if protocols == "" {
+		protocols = "http,https"
+	}
+	
+	threadSafe, _ := arguments["thread_safe"].(bool)
+	
+	// Extract template IDs if provided
+	var templateIDs []string
+	if templateIDsStr, ok := arguments["template_ids"].(string); ok && templateIDsStr != "" {
+		// Split comma-separated string into slice
+		templateIDs = strings.Split(templateIDsStr, ",")
+		// Trim whitespace
+		for i, id := range templateIDs {
+			templateIDs[i] = strings.TrimSpace(id)
+		}
+	} else if templateID, ok := arguments["template_id"].(string); ok && templateID != "" {
+		templateIDs = append(templateIDs, templateID)
+	}
+	
+	// Perform scan
+	var result ScanResult
+	var err error
+	
+	if threadSafe {
+		result, err = service.ThreadSafeScan(ctx, target, severity, protocols, templateIDs)
+	} else {
+		result, err = service.Scan(target, severity, protocols, templateIDs)
+	}
+	
+	if err != nil {
+		return nil, fmt.Errorf("scan failed: %w", err)
+	}
+	
+	// Format findings
+	var responseText string
+	if len(result.Findings) == 0 {
+		responseText = fmt.Sprintf("No vulnerabilities found for target: %s", target)
+	} else {
+		responseText = fmt.Sprintf("Found %d vulnerabilities for target: %s\n\n", len(result.Findings), target)
+		
+		for i, finding := range result.Findings {
+			responseText += fmt.Sprintf("Finding #%d:\n", i+1)
+			responseText += fmt.Sprintf("- Name: %s\n", finding.Info.Name)
+			responseText += fmt.Sprintf("- Severity: %s\n", finding.Info.SeverityHolder.Severity.String())
+			responseText += fmt.Sprintf("- Description: %s\n", finding.Info.Description)
+			responseText += fmt.Sprintf("- URL: %s\n\n", finding.Host)
+		}
+	}
+	
+	return mcp.NewToolResultText(responseText), nil
+}
+
+// handleBasicScanTool handles the basic_scan tool requests
+func handleBasicScanTool(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+	service *ScannerService,
+	logger *log.Logger,
+) (*mcp.CallToolResult, error) {
+	arguments := request.Params.Arguments
+	
+	// Extract target parameter
+	target, ok := arguments["target"].(string)
+	if !ok || target == "" {
+		return nil, fmt.Errorf("invalid or missing target parameter")
+	}
+	
+	// Perform basic scan
+	result, err := service.BasicScan(target)
+	if err != nil {
+		logger.Printf("Basic scan failed: %v", err)
+		return nil, err
+	}
+	
+	// Convert findings to a simplified format for the response
+	type SimplifiedFinding struct {
+		Name        string `json:"name"`
+		Severity    string `json:"severity"`
+		Description string `json:"description"`
+		URL         string `json:"url"`
+	}
+	
+	simplifiedFindings := make([]SimplifiedFinding, 0, len(result.Findings))
+	for _, finding := range result.Findings {
+		simplifiedFindings = append(simplifiedFindings, SimplifiedFinding{
+			Name:        finding.Info.Name,
+			Severity:    finding.Info.SeverityHolder.Severity.String(),
+			Description: finding.Info.Description,
+			URL:         finding.Host,
+		})
+	}
+	
+	// Create response
+	response := map[string]interface{}{
+		"target":         result.Target,
+		"scan_time":      result.ScanTime.Format(time.RFC3339),
+		"findings_count": len(result.Findings),
+		"findings":       simplifiedFindings,
+	}
+	
+	// Marshal response to JSON
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		logger.Printf("Failed to marshal response: %v", err)
+		return nil, err
+	}
+	
+	return mcp.NewToolResultText(string(responseJSON)), nil
+}
+
+// NewNucleiMCPServer creates a new MCP server for Nuclei
+func NewNucleiMCPServer(service *ScannerService, logger *log.Logger) *server.MCPServer {
+	mcpServer := server.NewMCPServer(
+		"nuclei-scanner",
+		"1.0.0",
+		server.WithLogging(),
+	)
+
+	// Add Nuclei scan tool
+	mcpServer.AddTool(mcp.NewTool("nuclei_scan",
+		mcp.WithDescription("Performs a Nuclei vulnerability scan on a target"),
+		mcp.WithString("target",
+			mcp.Description("Target URL or IP to scan"),
+			mcp.Required(),
+		),
+		mcp.WithString("severity",
+			mcp.Description("Minimum severity level (info, low, medium, high, critical)"),
+			mcp.DefaultString("info"),
+		),
+		mcp.WithString("protocols",
+			mcp.Description("Protocols to scan (comma-separated: http,https,tcp,etc)"),
+			mcp.DefaultString("http"),
+		),
+		mcp.WithBoolean("thread_safe",
+			mcp.Description("Use thread-safe engine for scanning"),
+		),
+		mcp.WithString("template_ids",
+			mcp.Description("Comma-separated template IDs to run (e.g. \"self-signed-ssl,nameserver-fingerprint\")"),
+		),
+		mcp.WithString("template_id",
+			mcp.Description("Single template ID to run (alternative to template_ids)"),
+		),
+	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleNucleiScanTool(ctx, request, service, logger)
+	})
+
+	// Add Basic scan tool
+	mcpServer.AddTool(mcp.NewTool("basic_scan",
+		mcp.WithDescription("Performs a basic Nuclei vulnerability scan on a target without requiring template IDs"),
+		mcp.WithString("target",
+			mcp.Description("Target URL or IP to scan"),
+			mcp.Required(),
+		),
+	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return handleBasicScanTool(ctx, request, service, logger)
+	})
+
+	// Add vulnerability resource
+	mcpServer.AddResource(mcp.NewResource("vulnerabilities", "Recent Vulnerability Reports"), 
+	func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+		return handleVulnerabilityResource(ctx, request, service, logger)
+	})
+
+	return mcpServer
+}
+
+// handleVulnerabilityResource handles the vulnerability resource requests
+func handleVulnerabilityResource(
+	ctx context.Context,
+	request mcp.ReadResourceRequest,
+	service *ScannerService,
+	logger *log.Logger,
+) ([]mcp.ResourceContents, error) {
+	// Get all cache entries (in a production system, you'd want to limit this)
+	c := service.cache
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	
+	var recentScans []map[string]interface{}
+	for _, result := range c.cache {
+		scanInfo := map[string]interface{}{
+			"target":    result.Target,
+			"scan_time": result.ScanTime.Format(time.RFC3339),
+			"findings":  len(result.Findings),
+		}
+		
+		// Add some sample findings
+		if len(result.Findings) > 0 {
+			var sampleFindings []map[string]string
+			// Limit to 5 findings for brevity
+			count := min(5, len(result.Findings))
+			for i := 0; i < count; i++ {
+				finding := result.Findings[i]
+				sampleFindings = append(sampleFindings, map[string]string{
+					"name":        finding.Info.Name,
+					"severity":    finding.Info.SeverityHolder.Severity.String(),
+					"description": finding.Info.Description,
+					"url":         finding.Host,
+				})
+			}
+			scanInfo["sample_findings"] = sampleFindings
+		}
+		
+		recentScans = append(recentScans, scanInfo)
+	}
+	
+	report := map[string]interface{}{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"recent_scans":  recentScans,
+		"total_scans":   len(recentScans),
+	}
+	
+	reportJSON, err := json.Marshal(report)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal report: %w", err)
+	}
+	
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      "vulnerabilities",
+			MIMEType: "application/json",
+			Text:     string(reportJSON),
 		},
 	}, nil
 }
 
-// ===== Application Setup =====
-
-// SetupSignalHandling configures graceful shutdown
-func SetupSignalHandling(logger *zap.Logger) {
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		logger.Info("Shutdown signal received, exiting...")
-		os.Exit(0)
-	}()
+// min returns the smaller of x or y
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
 }
 
-// Main function to set up and run the MCP server
+// setupSignalHandling configures graceful shutdown
+func setupSignalHandling() chan os.Signal {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	
+	return sigs
+}
+
 func main() {
-	// Initialize logger
-	logConfig := zap.NewDevelopmentConfig()
-	logConfig.Level.SetLevel(zap.InfoLevel)
-	logger, _ := logConfig.Build()
-	defer logger.Sync()
+	// Parse command line flags
+	transportType := flag.String("transport", "stdio", "Transport type (stdio or sse)")
+	flag.Parse()
 
-	logger.Info("Starting Nuclei MCP server...")
-	SetupSignalHandling(logger)
+	// Set up logging to file instead of stdout to avoid interfering with stdio transport
+	logFile, err := os.OpenFile("nuclei-mcp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open log file: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
 
-	// Create configuration
-	config := Config{
-		MaxWorkers:  5,
-		CacheExpiry: 5 * time.Minute,
+	logger := log.New(logFile, "", log.LstdFlags)
+	logger.Printf("Starting Nuclei MCP Server with %s transport", *transportType)
+
+	// Create scanner service
+	scannerService := NewScannerService(NewResultCache(5*time.Minute, logger), logger)
+
+	// Create MCP server
+	mcpServer := NewNucleiMCPServer(scannerService, logger)
+
+	// Set up signal handling for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	// Start server in a goroutine
+	go func() {
+		var err error
+		if *transportType == "sse" {
+			logger.Printf("Starting SSE server")
+			sseServer := server.NewSSEServer(mcpServer, "/")
+			err = sseServer.Start("0.0.0.0:8080")
+		} else {
+			logger.Printf("Starting stdio server")
+			err = server.ServeStdio(mcpServer)
+		}
+		
+		if err != nil {
+			logger.Printf("Error starting server: %v", err)
+			cancel()
+		}
+	}()
+
+	// Wait for signal or context cancellation
+	select {
+	case sig := <-sigChan:
+		logger.Printf("Received signal: %v", sig)
+	case <-ctx.Done():
+		logger.Printf("Context done: %v", ctx.Err())
 	}
 
-	// Initialize components
-	scannerPool := NewScannerPool(config.MaxWorkers, logger)
-	defer scannerPool.Close()
-
-	resultCache := NewResultCache(config.CacheExpiry, logger)
-	scannerService := NewScannerService(scannerPool, resultCache, logger)
-
-	// Create resource provider
-	vulnReportsProvider := NewVulnerabilityReportsProvider(scannerService, logger)
-
-	// Provider functions for FX
-	scannerToolProvider := func(lc fx.Lifecycle, logger *zap.Logger) fxctx.Tool {
-		tool := NewNucleiScanTool(scannerService, logger)
-		return tool
-	}
-
-	vulnReportsResourceFunc := func() fxctx.Resource {
-		return fxctx.NewResource(
-			mcp.Resource{
-				Name:        "vulnerability-reports",
-				Uri:         "nuclei://vulnerability-reports",
-				MimeType:    ptr("application/json"),
-				Description: ptr("Access recent vulnerability scan reports"),
-				Annotations: &mcp.ResourceAnnotations{
-					Audience: []mcp.Role{
-						mcp.RoleAssistant, mcp.RoleUser,
-					},
-				},
-			},
-			vulnReportsProvider.GetResource,
-		)
-	}
-
-	// Run the MCP server
-	app.
-		NewBuilder().
-		// Add the Nuclei scan tool with logger injection
-		WithTool(scannerToolProvider).
-		// Add resource provider - renamed to WithResource to match git example
-		WithResource(vulnReportsResourceFunc).
-		// Set server metadata
-		WithName("nuclei-mcp").
-		WithVersion("0.1.0").
-		// Use stdio transport for communication with LLMs
-		WithTransport(stdio.NewTransport()).
-		// Configure logging
-		WithFxOptions(fx.Provide(func() *zap.Logger {
-			return logger
-		}),
-			fx.Option(fx.WithLogger(
-				func(logger *zap.Logger) fxevent.Logger {
-					return &fxevent.ZapLogger{Logger: logger.Named("fx")}
-				},
-			)),
-		).
-		Run()
-
-	logger.Info("Nuclei MCP server stopped")
-}
-
-// Helper function to create pointers
-func ptr[T any](v T) *T {
-	return &v
+	logger.Printf("Server shutdown complete")
 }
