@@ -58,3 +58,6 @@ Thumbs.db
 *.log
 logs/
 .logs/
+
+# Large files
+nuclei/nuclei
