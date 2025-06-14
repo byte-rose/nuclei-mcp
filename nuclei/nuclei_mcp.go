@@ -54,7 +54,6 @@ func (c *ResultCache) Get(key string) (ScanResult, bool) {
 		return ScanResult{}, false
 	}
 
-	// Check if result has expired
 	if time.Since(result.ScanTime) > c.expiry {
 		c.logger.Printf("Cache entry expired: %s", key)
 		return ScanResult{}, false
@@ -94,13 +93,11 @@ func (s *ScannerService) CreateCacheKey(target string, severity string, protocol
 
 // Scan performs a nuclei scan
 func (s *ScannerService) Scan(target string, severity string, protocols string, templateIDs []string) (ScanResult, error) {
-	// Create cache key
 	cacheKey := s.CreateCacheKey(target, severity, protocols)
 	if len(templateIDs) > 0 {
 		cacheKey += ":" + strings.Join(templateIDs, ",")
 	}
 
-	// Check cache first
 	if result, found := s.cache.Get(cacheKey); found {
 		s.logger.Printf("Returning cached scan result for %s (%d findings)",
 			target, len(result.Findings))
@@ -109,12 +106,9 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 
 	s.logger.Printf("Starting new scan for target: %s", target)
 
-	// Create a new nuclei engine for this scan
 	options := []nuclei.NucleiSDKOptions{
 		nuclei.DisableUpdateCheck(),
 	}
-
-	// Add template filters if provided
 	if severity != "" || protocols != "" || len(templateIDs) > 0 {
 		filters := nuclei.TemplateFilters{}
 
@@ -143,7 +137,6 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 		options = append(options, nuclei.WithTemplateFilters(filters))
 	}
 
-	// Create the engine with options
 	ne, err := nuclei.NewNucleiEngineCtx(context.Background(), options...)
 	if err != nil {
 		s.logger.Printf("Failed to create nuclei engine: %v", err)
@@ -151,20 +144,15 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 	}
 	defer ne.Close()
 
-	// Load targets
 	ne.LoadTargets([]string{target}, true)
 
-	// Ensure templates are loaded
 	if err := ne.LoadAllTemplates(); err != nil {
 		s.logger.Printf("Failed to load templates: %v", err)
 		return ScanResult{}, err
 	}
 
-	// Collect results
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
-
-	// Callback for results
 	callback := func(event *output.ResultEvent) {
 		findingsMutex.Lock()
 		defer findingsMutex.Unlock()
@@ -175,21 +163,18 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 			event.Host)
 	}
 
-	// Execute scan with callback
 	err = ne.ExecuteWithCallback(callback)
 	if err != nil {
 		s.logger.Printf("Scan failed: %v", err)
 		return ScanResult{}, err
 	}
 
-	// Create result
 	result := ScanResult{
 		Target:   target,
 		Findings: findings,
 		ScanTime: time.Now(),
 	}
 
-	// Cache result
 	s.cache.Set(cacheKey, result)
 
 	s.logger.Printf("Scan completed for %s, found %d vulnerabilities",
@@ -200,13 +185,10 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 
 // ThreadSafeScan performs a thread-safe nuclei scan
 func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, severity string, protocols string, templateIDs []string) (ScanResult, error) {
-	// Create cache key
 	cacheKey := s.CreateCacheKey(target, severity, protocols)
 	if len(templateIDs) > 0 {
 		cacheKey += ":" + strings.Join(templateIDs, ",")
 	}
-
-	// Check cache first
 	if result, found := s.cache.Get(cacheKey); found {
 		s.logger.Printf("Returning cached scan result for %s (%d findings)",
 			target, len(result.Findings))
@@ -215,12 +197,9 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 
 	s.logger.Printf("Starting new thread-safe scan for target: %s", target)
 
-	// Create options for the thread-safe engine
 	options := []nuclei.NucleiSDKOptions{
 		nuclei.DisableUpdateCheck(),
 	}
-
-	// Add template filters if provided
 	if severity != "" || protocols != "" || len(templateIDs) > 0 {
 		filters := nuclei.TemplateFilters{}
 
@@ -249,7 +228,6 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 		options = append(options, nuclei.WithTemplateFilters(filters))
 	}
 
-	// Create a new thread-safe nuclei engine
 	ne, err := nuclei.NewThreadSafeNucleiEngineCtx(ctx, options...)
 	if err != nil {
 		s.logger.Printf("Failed to create thread-safe nuclei engine: %v", err)
@@ -257,11 +235,8 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 	}
 	defer ne.Close()
 
-	// Collect results
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
-
-	// Set up callback for results
 	ne.GlobalResultCallback(func(event *output.ResultEvent) {
 		findingsMutex.Lock()
 		defer findingsMutex.Unlock()
@@ -272,21 +247,18 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 			event.Host)
 	})
 
-	// Execute scan with options
 	err = ne.ExecuteNucleiWithOptsCtx(ctx, []string{target}, options...)
 	if err != nil {
 		s.logger.Printf("Thread-safe scan failed: %v", err)
 		return ScanResult{}, err
 	}
 
-	// Create result
 	result := ScanResult{
 		Target:   target,
 		Findings: findings,
 		ScanTime: time.Now(),
 	}
 
-	// Cache result
 	s.cache.Set(cacheKey, result)
 
 	s.logger.Printf("Thread-safe scan completed for %s, found %d vulnerabilities",
@@ -297,10 +269,7 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 
 // BasicScan performs a simple nuclei scan without requiring template IDs
 func (s *ScannerService) BasicScan(target string) (ScanResult, error) {
-	// Create cache key for basic scan
 	cacheKey := fmt.Sprintf("basic:%s", target)
-
-	// Check cache first
 	if result, found := s.cache.Get(cacheKey); found {
 		s.logger.Printf("Returning cached basic scan result for %s (%d findings)",
 			target, len(result.Findings))
@@ -308,8 +277,6 @@ func (s *ScannerService) BasicScan(target string) (ScanResult, error) {
 	}
 
 	s.logger.Printf("Starting new basic scan for target: %s", target)
-
-	// Ensure templates directory exists and is absolute path
 	templatesDir, err := filepath.Abs("./templates")
 	if err != nil {
 		s.logger.Printf("Failed to get absolute path for templates directory: %v", err)
@@ -317,7 +284,6 @@ func (s *ScannerService) BasicScan(target string) (ScanResult, error) {
 	}
 
 	if _, err := os.Stat(templatesDir); os.IsNotExist(err) {
-		// Create templates directory if it doesn't exist
 		s.logger.Printf("Creating templates directory: %s", templatesDir)
 		if err := os.MkdirAll(templatesDir, 0755); err != nil {
 			s.logger.Printf("Failed to create templates directory: %v", err)
@@ -325,12 +291,8 @@ func (s *ScannerService) BasicScan(target string) (ScanResult, error) {
 		}
 	}
 
-	// Create a basic template file path
 	basicTemplatePath := filepath.Join(templatesDir, "basic-test.yaml")
-
-	// Check if basic template exists, create it if not
 	if _, err := os.Stat(basicTemplatePath); os.IsNotExist(err) {
-		// Create a basic template for testing
 		basicTemplate := `id: basic-test
 info:
   name: Basic Test Template
@@ -347,7 +309,6 @@ requests:
         status:
           - 200
 `
-		// Write basic template to file
 		s.logger.Printf("Creating basic template: %s", basicTemplatePath)
 		if err := os.WriteFile(basicTemplatePath, []byte(basicTemplate), 0644); err != nil {
 			s.logger.Printf("Failed to write basic template: %v", err)
@@ -355,19 +316,13 @@ requests:
 		}
 	}
 
-	// Create a direct template path for nuclei to use
 	templatePath := basicTemplatePath
-
-	// Create nuclei options with specific template path
 	opts := []nuclei.NucleiSDKOptions{
-		// Explicitly use our template file directly
 		nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
 			Templates: []string{templatePath},
 		}),
 		nuclei.DisableUpdateCheck(),
 	}
-
-	// Create a new nuclei engine with our options
 	ne, err := nuclei.NewNucleiEngineCtx(context.Background(), opts...)
 	if err != nil {
 		s.logger.Printf("Failed to create nuclei engine: %v", err)
@@ -375,14 +330,10 @@ requests:
 	}
 	defer ne.Close()
 
-	// Load targets
 	ne.LoadTargets([]string{target}, true)
 
-	// Collect results
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
-
-	// Callback for results
 	callback := func(event *output.ResultEvent) {
 		findingsMutex.Lock()
 		defer findingsMutex.Unlock()
@@ -393,21 +344,18 @@ requests:
 			event.Host)
 	}
 
-	// Execute scan with callback
 	err = ne.ExecuteWithCallback(callback)
 	if err != nil {
 		s.logger.Printf("Basic scan failed: %v", err)
 		return ScanResult{}, err
 	}
 
-	// Create result
 	result := ScanResult{
 		Target:   target,
 		Findings: findings,
 		ScanTime: time.Now(),
 	}
 
-	// Cache result
 	s.cache.Set(cacheKey, result)
 
 	s.logger.Printf("Basic scan completed for %s, found %d vulnerabilities",
@@ -424,8 +372,6 @@ func handleNucleiScanTool(
 	logger *log.Logger,
 ) (*mcp.CallToolResult, error) {
 	arguments := request.Params.Arguments
-
-	// Extract parameters
 	target, ok := arguments["target"].(string)
 	if !ok || target == "" {
 		return nil, fmt.Errorf("invalid or missing target parameter")
@@ -442,21 +388,15 @@ func handleNucleiScanTool(
 	}
 
 	threadSafe, _ := arguments["thread_safe"].(bool)
-
-	// Extract template IDs if provided
 	var templateIDs []string
 	if templateIDsStr, ok := arguments["template_ids"].(string); ok && templateIDsStr != "" {
-		// Split comma-separated string into slice
 		templateIDs = strings.Split(templateIDsStr, ",")
-		// Trim whitespace
 		for i, id := range templateIDs {
 			templateIDs[i] = strings.TrimSpace(id)
 		}
 	} else if templateID, ok := arguments["template_id"].(string); ok && templateID != "" {
 		templateIDs = append(templateIDs, templateID)
 	}
-
-	// Perform scan
 	var result ScanResult
 	var err error
 
@@ -469,8 +409,6 @@ func handleNucleiScanTool(
 	if err != nil {
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
-
-	// Format findings
 	var responseText string
 	if len(result.Findings) == 0 {
 		responseText = fmt.Sprintf("No vulnerabilities found for target: %s", target)
@@ -497,21 +435,15 @@ func handleBasicScanTool(
 	logger *log.Logger,
 ) (*mcp.CallToolResult, error) {
 	arguments := request.Params.Arguments
-
-	// Extract target parameter
 	target, ok := arguments["target"].(string)
 	if !ok || target == "" {
 		return nil, fmt.Errorf("invalid or missing target parameter")
 	}
-
-	// Perform basic scan
 	result, err := service.BasicScan(target)
 	if err != nil {
 		logger.Printf("Basic scan failed: %v", err)
 		return nil, err
 	}
-
-	// Convert findings to a simplified format for the response
 	type SimplifiedFinding struct {
 		Name        string `json:"name"`
 		Severity    string `json:"severity"`
@@ -528,16 +460,12 @@ func handleBasicScanTool(
 			URL:         finding.Host,
 		})
 	}
-
-	// Create response
 	response := map[string]interface{}{
 		"target":         result.Target,
 		"scan_time":      result.ScanTime.Format(time.RFC3339),
 		"findings_count": len(result.Findings),
 		"findings":       simplifiedFindings,
 	}
-
-	// Marshal response to JSON
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
 		logger.Printf("Failed to marshal response: %v", err)
@@ -555,8 +483,6 @@ func handleAdvancedScanTool(
 	logger *log.Logger,
 ) (*mcp.CallToolResult, error) {
 	arguments := request.Params.Arguments
-
-	// Extract parameters
 	target, ok := arguments["target"].(string)
 	if !ok || target == "" {
 		return nil, fmt.Errorf("invalid or missing target parameter")
@@ -564,8 +490,6 @@ func handleAdvancedScanTool(
 
 	severity, _ := arguments["severity"].(string)
 	protocols, _ := arguments["protocols"].(string)
-	
-	// Extract template IDs
 	var templateIDs []string
 	if templateIDsStr, ok := arguments["template_ids"].(string); ok && templateIDsStr != "" {
 		templateIDs = strings.Split(templateIDsStr, ",")
@@ -573,8 +497,6 @@ func handleAdvancedScanTool(
 			templateIDs[i] = strings.TrimSpace(id)
 		}
 	}
-
-	// Extract tags
 	var tags []string
 	if tagsStr, ok := arguments["tags"].(string); ok && tagsStr != "" {
 		tags = strings.Split(tagsStr, ",")
@@ -582,8 +504,6 @@ func handleAdvancedScanTool(
 			tags[i] = strings.TrimSpace(tag)
 		}
 	}
-
-	// Extract exclude tags
 	var excludeTags []string
 	if excludeTagsStr, ok := arguments["exclude_tags"].(string); ok && excludeTagsStr != "" {
 		excludeTags = strings.Split(excludeTagsStr, ",")
@@ -591,8 +511,6 @@ func handleAdvancedScanTool(
 			excludeTags[i] = strings.TrimSpace(tag)
 		}
 	}
-
-	// Extract authors
 	var authors []string
 	if authorsStr, ok := arguments["authors"].(string); ok && authorsStr != "" {
 		authors = strings.Split(authorsStr, ",")
@@ -600,8 +518,6 @@ func handleAdvancedScanTool(
 			authors[i] = strings.TrimSpace(author)
 		}
 	}
-
-	// Extract exclude template IDs
 	var excludeIDs []string
 	if excludeIDsStr, ok := arguments["exclude_ids"].(string); ok && excludeIDsStr != "" {
 		excludeIDs = strings.Split(excludeIDsStr, ",")
@@ -614,8 +530,6 @@ func handleAdvancedScanTool(
 	options := []nuclei.NucleiSDKOptions{
 		nuclei.DisableUpdateCheck(),
 	}
-
-	// Add template filters
 	if severity != "" || protocols != "" || len(templateIDs) > 0 || len(tags) > 0 || len(excludeTags) > 0 || len(authors) > 0 || len(excludeIDs) > 0 {
 		filters := nuclei.TemplateFilters{
 			Severity:      severity,
@@ -627,79 +541,68 @@ func handleAdvancedScanTool(
 			ExcludeIDs:    excludeIDs,
 		}
 
-		// Add exclude severities if provided
 		if excludeSeverities, ok := arguments["exclude_severities"].(string); ok && excludeSeverities != "" {
 			filters.ExcludeSeverities = excludeSeverities
 		}
 
-		// Add exclude protocol types if provided
 		if excludeProtocolTypes, ok := arguments["exclude_protocol_types"].(string); ok && excludeProtocolTypes != "" {
 			filters.ExcludeProtocolTypes = excludeProtocolTypes
 		}
 
 		options = append(options, nuclei.WithTemplateFilters(filters))
 	}
-
-	// Add concurrency options if provided
 	if templateConcurrency, ok := arguments["template_concurrency"].(float64); ok && templateConcurrency > 0 {
 		hostConcurrency, _ := arguments["host_concurrency"].(float64)
 		headlessHostConcurrency, _ := arguments["headless_host_concurrency"].(float64)
 		headlessTemplateConcurrency, _ := arguments["headless_template_concurrency"].(float64)
-		
+
 		concurrency := nuclei.Concurrency{
 			TemplateConcurrency:         int(templateConcurrency),
 			HostConcurrency:             int(hostConcurrency),
 			HeadlessHostConcurrency:     getIntOrDefault(int(headlessHostConcurrency), 10),
 			HeadlessTemplateConcurrency: getIntOrDefault(int(headlessTemplateConcurrency), 10),
 		}
-		
-		// Add additional concurrency options if provided
+
 		if jsTemplateConcurrency, ok := arguments["js_template_concurrency"].(float64); ok && jsTemplateConcurrency > 0 {
 			concurrency.JavascriptTemplateConcurrency = int(jsTemplateConcurrency)
 		} else {
 			concurrency.JavascriptTemplateConcurrency = 10 // Default value
 		}
-		
+
 		if templatePayloadConcurrency, ok := arguments["template_payload_concurrency"].(float64); ok && templatePayloadConcurrency > 0 {
 			concurrency.TemplatePayloadConcurrency = int(templatePayloadConcurrency)
 		} else {
 			concurrency.TemplatePayloadConcurrency = 25 // Default value
 		}
-		
+
 		if probeConcurrency, ok := arguments["probe_concurrency"].(float64); ok && probeConcurrency > 0 {
 			concurrency.ProbeConcurrency = int(probeConcurrency)
 		} else {
 			concurrency.ProbeConcurrency = 50 // Default value
 		}
-		
+
 		options = append(options, nuclei.WithConcurrency(concurrency))
 	}
-
-	// Add timeout and retries if provided
 	if timeout, ok := arguments["timeout"].(float64); ok && timeout > 0 {
 		retries, _ := arguments["retries"].(float64)
 		maxHostError, _ := arguments["max_host_error"].(float64)
-		
+
 		networkConfig := nuclei.NetworkConfig{
 			Timeout:      int(timeout),
 			Retries:      int(retries),
 			MaxHostError: int(maxHostError),
 		}
-		
-		// Add disable max host error if provided
+
 		if disableMaxHostErr, ok := arguments["disable_max_host_error"].(bool); ok {
 			networkConfig.DisableMaxHostErr = disableMaxHostErr
 		}
-		
+
 		options = append(options, nuclei.WithNetworkConfig(networkConfig))
 	}
-
-	// Add scan strategy if provided
 	if scanStrategy, ok := arguments["scan_strategy"].(string); ok && scanStrategy != "" {
 		options = append(options, nuclei.WithScanStrategy(scanStrategy))
 	}
 
-	// Add feature flags
 	if enableHeadless, ok := arguments["enable_headless"].(bool); ok && enableHeadless {
 		options = append(options, nuclei.EnableHeadlessWithOpts(nil))
 	}
@@ -711,17 +614,15 @@ func handleAdvancedScanTool(
 	if dastMode, ok := arguments["dast_mode"].(bool); ok && dastMode {
 		options = append(options, nuclei.DASTMode())
 	}
-	
-	// Add template type enablement flags
+
 	if enableCodeTemplates, ok := arguments["enable_code_templates"].(bool); ok && enableCodeTemplates {
 		options = append(options, nuclei.EnableCodeTemplates())
 	}
-	
+
 	if enableFileTemplates, ok := arguments["enable_file_templates"].(bool); ok && enableFileTemplates {
 		options = append(options, nuclei.EnableFileTemplates())
 	}
-	
-	// Add custom headers if provided
+
 	var headers []string
 	if headersStr, ok := arguments["headers"].(string); ok && headersStr != "" {
 		headers = strings.Split(headersStr, ",")
@@ -730,8 +631,7 @@ func handleAdvancedScanTool(
 		}
 		options = append(options, nuclei.WithHeaders(headers))
 	}
-	
-	// Add custom variables if provided
+
 	var vars []string
 	if varsStr, ok := arguments["vars"].(string); ok && varsStr != "" {
 		vars = strings.Split(varsStr, ",")
