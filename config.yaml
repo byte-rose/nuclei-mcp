@@ -1,0 +1,7 @@
+server:
+  name: "nuclei-scanner"
+  version: "1.0.0"
+cache:
+  expiry: "1h"
+logging:
+  path: "logs/nuclei_mcp.log"
