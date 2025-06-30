@@ -63,10 +63,10 @@ func NewNucleiMCPServer(service *scanner.ScannerService, logger *log.Logger, tm 
 	})
 
 	// Add vulnerability resource
-	mcpServer.AddResource(mcp.NewResource("vulnerabilities", "Recent Vulnerability Reports"), 
-	func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-		return handleVulnerabilityResource(ctx, request, service, logger)
-	})
+	mcpServer.AddResource(mcp.NewResource("vulnerabilities", "Recent Vulnerability Reports"),
+		func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			return handleVulnerabilityResource(ctx, request, service, logger)
+		})
 
 	// Add template management tools
 	mcpServer.AddTool(mcp.NewTool("add_template",
@@ -105,7 +105,6 @@ func handleNucleiScanTool(
 		return nil, fmt.Errorf("invalid arguments format")
 	}
 
-	// Extract parameters
 	target, ok := argMap["target"].(string)
 	if !ok || target == "" {
 		return nil, fmt.Errorf("invalid or missing target parameter")
@@ -134,7 +133,6 @@ func handleNucleiScanTool(
 		templateIDs = append(templateIDs, id)
 	}
 
-	// Perform scan
 	var result cache.ScanResult
 	var err error
 
@@ -143,18 +141,17 @@ func handleNucleiScanTool(
 	} else {
 		result, err = service.Scan(target, severity, protocols, templateIDs)
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
-	
-	// Format findings
+
 	var responseText string
 	if len(result.Findings) == 0 {
 		responseText = fmt.Sprintf("No vulnerabilities found for target: %s", target)
 	} else {
 		responseText = fmt.Sprintf("Found %d vulnerabilities for target: %s\n\n", len(result.Findings), target)
-		
+
 		for i, finding := range result.Findings {
 			responseText += fmt.Sprintf("Finding #%d:\n", i+1)
 			responseText += fmt.Sprintf("- Name: %s\n", finding.Info.Name)
@@ -163,7 +160,7 @@ func handleNucleiScanTool(
 			responseText += fmt.Sprintf("- URL: %s\n\n", finding.Host)
 		}
 	}
-	
+
 	return mcp.NewToolResultText(responseText), nil
 }
 
@@ -179,27 +176,24 @@ func handleBasicScanTool(
 		return nil, fmt.Errorf("invalid arguments format")
 	}
 
-	// Extract target parameter
 	target, ok := argMap["target"].(string)
 	if !ok || target == "" {
 		return nil, fmt.Errorf("invalid or missing target parameter")
 	}
-	
-	// Perform basic scan
+
 	result, err := service.BasicScan(target)
 	if err != nil {
 		logger.Printf("Basic scan failed: %v", err)
 		return nil, err
 	}
-	
-	// Convert findings to a simplified format for the response
+
 	type SimplifiedFinding struct {
 		Name        string `json:"name"`
 		Severity    string `json:"severity"`
 		Description string `json:"description"`
 		URL         string `json:"url"`
 	}
-	
+
 	simplifiedFindings := make([]SimplifiedFinding, 0, len(result.Findings))
 	for _, finding := range result.Findings {
 		simplifiedFindings = append(simplifiedFindings, SimplifiedFinding{
@@ -209,22 +203,20 @@ func handleBasicScanTool(
 			URL:         finding.Host,
 		})
 	}
-	
-	// Create response
+
 	response := map[string]interface{}{
 		"target":         result.Target,
 		"scan_time":      result.ScanTime.Format(time.RFC3339),
 		"findings_count": len(result.Findings),
 		"findings":       simplifiedFindings,
 	}
-	
-	// Marshal response to JSON
+
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
 		logger.Printf("Failed to marshal response: %v", err)
 		return nil, err
 	}
-	
+
 	return mcp.NewToolResultText(string(responseJSON)), nil
 }
 
@@ -244,8 +236,7 @@ func handleVulnerabilityResource(
 			"scan_time": result.ScanTime.Format(time.RFC3339),
 			"findings":  len(result.Findings),
 		}
-		
-		// Add some sample findings
+
 		if len(result.Findings) > 0 {
 			var sampleFindings []map[string]string
 			// Limit to 5 findings for brevity
@@ -261,29 +252,29 @@ func handleVulnerabilityResource(
 			}
 			scanInfo["sample_findings"] = sampleFindings
 		}
-		
+
 		recentScans = append(recentScans, scanInfo)
 	}
-	
+
 	report := map[string]interface{}{
-		"timestamp":     time.Now().Format(time.RFC3339),
-		"recent_scans":  recentScans,
-		"total_scans":   len(recentScans),
+		"timestamp":    time.Now().Format(time.RFC3339),
+		"recent_scans": recentScans,
+		"total_scans":  len(recentScans),
 	}
-	
+
 	reportJSON, err := json.Marshal(report)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal report: %w", err)
 	}
-	
+
 	return []mcp.ResourceContents{
-		mcp.TextResourceContents{
-			URI:      "vulnerabilities",
-			MIMEType: "application/json",
-			Text:     string(reportJSON),
+			mcp.TextResourceContents{
+				URI:      "vulnerabilities",
+				MIMEType: "application/json",
+				Text:     string(reportJSON),
+			},
 		},
-	},
-	nil
+		nil
 }
 
 // min returns the smaller of x or y
