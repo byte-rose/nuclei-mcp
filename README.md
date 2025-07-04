@@ -1,63 +1,97 @@
-# Nuclei MCP Server
+# Nuclei MCP Integration
 
-This is a Mark3 Labs MCP server implementation for Nuclei, a fast and customizable vulnerability scanner.
+A Model Context Protocol (MCP) server implementation that integrates Nuclei, a fast and customizable vulnerability scanner, with the MCP ecosystem. This server provides a standardized interface for performing security scans and managing vulnerability assessments programmatically.
 
-## Features
+## 🚀 Features
 
-- **Caching**: Scan results are cached with configurable expiry to improve performance
-- **Thread-safe**: Supports concurrent scanning operations
-- **Template filtering**: Allows filtering by severity, protocols, and template IDs
-- **Basic & Advanced Scanning**: Provides both simple and advanced scanning options
+- **Vulnerability Scanning**: Perform comprehensive security scans using Nuclei's powerful scanning engine
+- **Template Management**: Add, list, and manage custom Nuclei templates
+- **Result Caching**: Configurable caching system to optimize repeated scans
+- **Concurrent Operations**: Thread-safe implementation for high-performance scanning
+- **RESTful API**: Standardized interface for integration with other MCP-compliant tools
+- **Detailed Reporting**: Structured vulnerability reports with severity levels and remediation guidance
 
-## Usage
+## 🛠️ Tools & Endpoints
 
-The server provides the following tools:
+### Core Tools
 
-1. **nuclei_scan**: Perform a full Nuclei scan with template filtering
-2. **basic_scan**: Perform a simple scan without template IDs
-3. **vulnerability_resource**: Query scan results as resources
-4. **advanced_scan**: Perform a comprehensive scan with extensive configuration options
-5. **template_sources_scan**: Perform scans using custom template sources
+- **nuclei_scan**: Perform a full Nuclei scan with advanced filtering options
+- **basic_scan**: Quick scan with minimal configuration
+- **vulnerability_resource**: Query and retrieve scan results
+- **add_template**: Add custom Nuclei templates
+- **list_templates**: View available templates
+- **get_template**: Retrieve details of a specific template
 
-## Running the Server
+## 🚀 Getting Started
 
-You can run the server directly using Go:
+### Prerequisites
+
+- Go 1.16+
+- Nuclei (will be automatically downloaded if not present)
+- Node.js 14+ (for MCP Inspector)
+
+### Installation
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/your-org/nuclei-mcp.git
+   cd nuclei-mcp
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   go mod download
+   ```
+
+### Running the Server
+
+Start the MCP server:
 
 ```bash
-# From the nuclei directory
-go run nuclei_mcp.go
+go run cmd/nuclei-mcp/main.go
 ```
 
-## Using the MCP Inspector
+### Using the MCP Inspector
 
-The MCP Inspector is a powerful tool for debugging and testing your MCP server. To use it with the Nuclei MCP server:
+For development and testing, use the MCP Inspector:
 
 ```bash
-# Install the MCP Inspector (if not already installed)
+# Install the MCP Inspector globally
 npm install -g @modelcontextprotocol/inspector
 
-# Run the inspector with the Nuclei MCP server
-npx @modelcontextprotocol/inspector go run ./nuclei_mcp.go
+# Start the inspector with the Nuclei MCP server
+npx @modelcontextprotocol/inspector go run cmd/nuclei-mcp/main.go
 ```
 
-This will:
-1. Start the MCP Inspector UI (available at http://localhost:5173)
-2. Launch the Nuclei MCP server
-3. Connect the inspector to the server
+The inspector UI will be available at [http://localhost:5173](http://localhost:5173)
 
-In the inspector UI, you can:
-- View available tools and their schemas
-- Execute tool calls and view results
-- Inspect resources provided by the server
-- Monitor server notifications
+## ⚙️ Configuration
 
-## Configuration
+Configuration is managed through environment variables:
 
-Configure the server via environment variables:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CACHE_EXPIRY` | Duration for cache expiry | 1h |
+| `LOG_LEVEL` | Logging level (debug, info, warn, error) | info |
+| `LOG_PATH` | Path to log file | ./logs/nuclei-mcp.log |
 
-- `CACHE_EXPIRY`: Duration for cache expiry (default: 1h)
-- `LOG_LEVEL`: Logging level (default: info)
+## 📚 Documentation
 
-## API
+- [MCP Protocol Documentation](https://modelcontextprotocol.io)
+- [Nuclei Documentation](https://nuclei.projectdiscovery.io/)
+- [API Reference](./docs/API.md)
 
-The server implements the standard MCP server interface. See the mpc package here:  [Mark3 Labs MCP documentation](https://github.com/mark3labs/mcp-go) for details.
+## 🤝 Contributing
+
+Contributions are welcome! Please read our [Contributing Guidelines](./CONTRIBUTING.md) for details.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🔗 Related Projects
+
+- [Nuclei](https://github.com/projectdiscovery/nuclei)
+- [MCP Go](https://github.com/mark3labs/mcp-go)
