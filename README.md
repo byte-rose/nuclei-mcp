@@ -69,13 +69,55 @@ The inspector UI will be available at [http://localhost:5173](http://localhost:5
 
 ## ⚙️ Configuration
 
-Configuration is managed through environment variables:
+Configuration can be managed through a YAML configuration file or environment variables. The server looks for configuration in the following locations (in order of precedence):
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CACHE_EXPIRY` | Duration for cache expiry | 1h |
-| `LOG_LEVEL` | Logging level (debug, info, warn, error) | info |
-| `LOG_PATH` | Path to log file | ./logs/nuclei-mcp.log |
+1. File specified by `--config` flag
+2. `config.yaml` in the current directory
+3. `$HOME/.nuclei-mcp/config.yaml`
+4. `/etc/nuclei-mcp/config.yaml`
+
+### Configuration File Example
+
+Create a `config.yaml` file with the following structure:
+
+```yaml
+server:
+  name: "nuclei-mcp"
+  version: "1.0.0"
+  port: 3000
+  host: "127.0.0.1"
+
+cache:
+  enabled: true
+  expiry: 1h
+  max_size: 1000
+
+logging:
+  level: "info"
+  path: "./logs/nuclei-mcp.log"
+  max_size_mb: 10
+  max_backups: 5
+  max_age_days: 30
+  compress: true
+
+nuclei:
+  templates_directory: "nuclei-templates"
+  timeout: 5m
+  rate_limit: 150
+  bulk_size: 25
+  template_threads: 10
+  headless: false
+  show_browser: false
+  system_resolvers: true
+```
+
+### Environment Variables
+
+All configuration options can also be set using environment variables with the `NUCLEI_MCP_` prefix (e.g., `NUCLEI_MCP_SERVER_PORT=3000`). Nested configuration can be set using double underscores (e.g., `NUCLEI_MCP_LOGGING_LEVEL=debug`).
+
+## ⚠️ Important Note
+
+This project is under active development. Breaking changes may be introduced in future releases. Please ensure you pin to a specific version when using this in production environments.
 
 ## 📚 Documentation
 
