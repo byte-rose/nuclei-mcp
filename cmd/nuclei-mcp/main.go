@@ -52,11 +52,13 @@ func setupLogging(cfg config.LoggingConfig) (*logging.ConsoleLogger, error) {
 }
 
 func main() {
+
 	// Load configuration
 	cfg, err := config.LoadConfig("")
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+
 
 	// Initialize logger
 	consoleLogger, err := setupLogging(cfg.Logging)
@@ -64,6 +66,7 @@ func main() {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 	defer consoleLogger.Close()
+
 
 	// Log startup information
 	consoleLogger.Log("Starting %s v%s", cfg.Server.Name, cfg.Server.Version)
@@ -86,6 +89,7 @@ func main() {
 		os.Exit(1)
 	}
 	consoleLogger.Log("Using templates directory: %s", templatesDir)
+
 
 	// Initialize scanner service with the absolute path
 	scannerService := scanner.NewScannerService(resultCache, consoleLogger, templatesDir)
@@ -110,6 +114,8 @@ func main() {
 		}
 	}()
 
+
+=======
 	// Set up signal handling
 	signals := setupSignalHandling()
 

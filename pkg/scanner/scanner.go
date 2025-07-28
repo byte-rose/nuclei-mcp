@@ -45,6 +45,7 @@ func (s *ScannerService) CreateCacheKey(target string, severity string, protocol
 }
 
 // Scan performs a nuclei scan
+
 func (s *ScannerService) Scan(target string, severityFilter string, protocolFilter string, templateIDs []string) (cache.ScanResult, error) {
 	// Create cache key
 	cacheKey := s.CreateCacheKey(target, severityFilter, protocolFilter)
@@ -52,13 +53,13 @@ func (s *ScannerService) Scan(target string, severityFilter string, protocolFilt
 		cacheKey += ":" + strings.Join(templateIDs, ",")
 	}
 
-	// Check cache first
 	if result, found := s.cache.Get(cacheKey); found {
 		s.console.Log("Returning cached scan result for %s (%d findings)", target, len(result.Findings))
 		return result, nil
 	}
 
 	s.console.Log("Starting new scan for target: %s", target)
+
 
 	// --- Start of Nuclei Lib integration ---
 
@@ -105,12 +106,23 @@ func (s *ScannerService) Scan(target string, severityFilter string, protocolFilt
 		options = append(options, lib.WithTemplateFilters(filters))
 	}
 
+
 	ne, err := lib.NewNucleiEngine(options...)
+
 	if err != nil {
 		s.console.Log("Failed to create nuclei engine: %v", err)
 		return cache.ScanResult{}, err
 	}
 	defer ne.Close()
+
+
+	if err := ne.LoadAllTemplates(); err != nil {
+		s.console.Log("Failed to load templates: %v", err)
+		return cache.ScanResult{}, err
+	}
+
+	var findings []*output.ResultEvent
+	var findingsMutex sync.Mutex
 
 	// 4. Load targets
 	ne.LoadTargets([]string{target}, false) // Don't probe non-HTTP targets
@@ -126,21 +138,20 @@ func (s *ScannerService) Scan(target string, severityFilter string, protocolFilt
 		s.console.Log("Found vulnerability: %s (%s) on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Host)
 	}
 
+
 	if err := ne.ExecuteWithCallback(callback); err != nil {
+
 		s.console.Log("Scan failed: %v", err)
 		return cache.ScanResult{}, err
 	}
 
-	// --- End of Nuclei Lib integration ---
 
-	// Create result
 	result := cache.ScanResult{
 		Target:   target,
 		Findings: findings,
 		ScanTime: time.Now(),
 	}
 
-	// Cache result
 	s.cache.Set(cacheKey, result)
 
 	s.console.Log("Scan completed for %s, found %d vulnerabilities", target, len(findings))
@@ -150,13 +161,11 @@ func (s *ScannerService) Scan(target string, severityFilter string, protocolFilt
 
 // ThreadSafeScan performs a thread-safe nuclei scan
 func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, severity string, protocols string, templateIDs []string) (cache.ScanResult, error) {
-	// Create cache key
 	cacheKey := s.CreateCacheKey(target, severity, protocols)
 	if len(templateIDs) > 0 {
 		cacheKey += ":" + strings.Join(templateIDs, ",")
 	}
 
-	// Check cache first
 	if result, found := s.cache.Get(cacheKey); found {
 		s.console.Log("Returning cached scan result for %s (%d findings)", target, len(result.Findings))
 		return result, nil
@@ -164,12 +173,14 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 
 	s.console.Log("Starting new thread-safe scan for target: %s", target)
 
+
 	// --- Start of Nuclei Lib integration ---
 
 	// 1. Create Nuclei Engine with options
 	options := []lib.NucleiSDKOptions{
 		lib.DisableUpdateCheck(),
 	}
+
 
 	// 2. Define Template Sources
 	templateSources := lib.TemplateSources{}
@@ -209,15 +220,17 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 		options = append(options, lib.WithTemplateFilters(filters))
 	}
 
+
 	// Create a new thread-safe nuclei engine.
 	ne, err := lib.NewThreadSafeNucleiEngineCtx(ctx, options...)
+
 	if err != nil {
 		s.console.Log("Failed to create thread-safe nuclei engine: %v", err)
 		return cache.ScanResult{}, err
 	}
 	defer ne.Close()
 
-	// 4. Set up callback to collect results
+
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
 	ne.GlobalResultCallback(func(event *output.ResultEvent) {
@@ -227,22 +240,20 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 		s.console.Log("Found vulnerability: %s (%s) on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Host)
 	})
 
+
 	// 5. Execute scan
 	if err := ne.ExecuteNucleiWithOptsCtx(ctx, []string{target}, options...); err != nil {
 		s.console.Log("Thread-safe scan failed: %v", err)
 		return cache.ScanResult{}, err
 	}
 
-	// --- End of Nuclei Lib integration ---
 
-	// Create result
 	result := cache.ScanResult{
 		Target:   target,
 		Findings: findings,
 		ScanTime: time.Now(),
 	}
 
-	// Cache result
 	s.cache.Set(cacheKey, result)
 
 	s.console.Log("Thread-safe scan completed for %s, found %d vulnerabilities", target, len(findings))
@@ -252,8 +263,8 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 
 // BasicScan performs a simple nuclei scan using the default basic-test.yaml template.
 func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
-	// Create cache key for basic scan
 	cacheKey := fmt.Sprintf("basic:%s", target)
+
 
 	// Check cache first if enabled
 	if s.cache != nil {
@@ -264,6 +275,7 @@ func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
 	}
 
 	s.console.Log("Starting new basic scan for target: %s", target)
+
 
 	// Define the path to the basic test template using the configured templates directory
 	basicTemplatePath := filepath.Join(s.TemplatesDir, "basic-test.yaml")
@@ -282,8 +294,10 @@ func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
 		lib.DisableUpdateCheck(),
 	}
 
+
 	// Create a new nuclei engine with our options
 	ne, err := lib.NewNucleiEngine(opts...)
+
 	if err != nil {
 		s.console.Log("Failed to create nuclei engine: %v", err)
 		return cache.ScanResult{}, err
@@ -293,11 +307,9 @@ func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
 	// Load targets
 	ne.LoadTargets([]string{target}, true) // Probe for HTTP targets
 
-	// Collect results
+
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
-
-	// Callback for results
 	callback := func(event *output.ResultEvent) {
 		findingsMutex.Lock()
 		defer findingsMutex.Unlock()
@@ -305,13 +317,14 @@ func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
 		s.console.Log("Found vulnerability: %s (%s) on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Host)
 	}
 
+
 	// Execute scan with callback
 	if err := ne.ExecuteWithCallback(callback); err != nil {
+
 		s.console.Log("Basic scan failed: %v", err)
 		return cache.ScanResult{}, err
 	}
 
-	// Create result
 	result := cache.ScanResult{
 		Target:   target,
 		Findings: findings,
@@ -322,6 +335,7 @@ func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
 	if s.cache != nil {
 		s.cache.Set(cacheKey, result)
 	}
+
 
 	s.console.Log("Basic scan completed for %s, found %d vulnerabilities", target, len(findings))
 

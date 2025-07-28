@@ -246,10 +246,9 @@ func handleVulnerabilityResource(
 			"findings":  len(result.Findings),
 		}
 
-		// Add some sample findings
+
 		if len(result.Findings) > 0 {
 			var sampleFindings []map[string]string
-			// Limit to 5 findings for brevity
 			count := min(5, len(result.Findings))
 			for i := 0; i < count; i++ {
 				finding := result.Findings[i]
