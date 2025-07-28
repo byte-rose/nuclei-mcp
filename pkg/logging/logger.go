@@ -28,7 +28,12 @@ func NewConsoleLogger(logPath string) (*ConsoleLogger, error) {
 		return nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	multiWriter := io.MultiWriter(file, os.Stdout)
+
+  multiWriter := io.MultiWriter(file, os.Stderr)
+                                
+                                
+                                
+                            
 	logger := log.New(multiWriter, "", log.LstdFlags)
 
 	return &ConsoleLogger{
@@ -43,6 +48,12 @@ func (cl *ConsoleLogger) Log(format string, v ...interface{}) {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	cl.logger.Printf(format, v...)
+}
+
+// Close closes the log file
+// GetWriter returns the io.Writer used by the logger.
+func (cl *ConsoleLogger) GetWriter() io.Writer {
+	return cl.logger.Writer()
 }
 
 // Close closes the log file

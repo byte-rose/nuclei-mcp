@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"nuclei-mcp/pkg/cache"
 	"nuclei-mcp/pkg/scanner"
 	"nuclei-mcp/pkg/templates"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // NewNucleiMCPServer creates a new MCP server for Nuclei
@@ -244,6 +245,7 @@ func handleVulnerabilityResource(
 			"scan_time": result.ScanTime.Format(time.RFC3339),
 			"findings":  len(result.Findings),
 		}
+
 
 		if len(result.Findings) > 0 {
 			var sampleFindings []map[string]string

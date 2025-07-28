@@ -12,22 +12,30 @@ import (
 	"nuclei-mcp/pkg/cache"
 	"nuclei-mcp/pkg/logging"
 
-	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
+	lib "github.com/projectdiscovery/nuclei/v3/lib"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 )
 
 // ScannerService provides nuclei scanning operations
 type ScannerService struct {
-	cache   *cache.ResultCache
-	console *logging.ConsoleLogger
-	Cache   *cache.ResultCache // Exported for testing purposes
+	cache        cache.ResultCacheInterface
+	console      *logging.ConsoleLogger
+	Cache        cache.ResultCacheInterface // Exported for testing purposes
+	TemplatesDir string
 }
 
 // NewScannerService creates a new scanner service
-func NewScannerService(cache *cache.ResultCache, console *logging.ConsoleLogger) *ScannerService {
+func NewScannerService(cacheImpl cache.ResultCacheInterface, console *logging.ConsoleLogger, templatesDir string) *ScannerService {
+	// If cache is nil, create a no-op cache
+	if cacheImpl == nil {
+		cacheImpl = cache.NewNoopCache()
+	}
+
 	return &ScannerService{
-		Cache:   cache,
-		console: console,
+		cache:        cacheImpl,
+		Cache:        cacheImpl, // Keep both fields in sync
+		console:      console,
+		TemplatesDir: templatesDir,
 	}
 }
 
@@ -37,8 +45,10 @@ func (s *ScannerService) CreateCacheKey(target string, severity string, protocol
 }
 
 // Scan performs a nuclei scan
-func (s *ScannerService) Scan(target string, severity string, protocols string, templateIDs []string) (cache.ScanResult, error) {
-	cacheKey := s.CreateCacheKey(target, severity, protocols)
+
+func (s *ScannerService) Scan(target string, severityFilter string, protocolFilter string, templateIDs []string) (cache.ScanResult, error) {
+	// Create cache key
+	cacheKey := s.CreateCacheKey(target, severityFilter, protocolFilter)
 	if len(templateIDs) > 0 {
 		cacheKey += ":" + strings.Join(templateIDs, ",")
 	}
@@ -50,45 +60,61 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 
 	s.console.Log("Starting new scan for target: %s", target)
 
-	options := []nuclei.NucleiSDKOptions{
-		nuclei.DisableUpdateCheck(),
-	}
-	if severity != "" || protocols != "" || len(templateIDs) > 0 {
-		filters := nuclei.TemplateFilters{}
 
-		if severity != "" {
-			filters.Severity = severity
-		}
+	// --- Start of Nuclei Lib integration ---
 
-		if protocols != "" {
-			protocolsList := strings.Split(protocols, ",")
-			var validProtocols []string
-			for _, p := range protocolsList {
-				p = strings.TrimSpace(p)
-				if p != "https" {
-					validProtocols = append(validProtocols, p)
-				}
-			}
-			if len(validProtocols) > 0 {
-				filters.ProtocolTypes = strings.Join(validProtocols, ",")
-			}
-		}
-
-		if len(templateIDs) > 0 {
-			filters.IDs = templateIDs
-		}
-
-		options = append(options, nuclei.WithTemplateFilters(filters))
+	// 1. Create Nuclei Engine with options
+	options := []lib.NucleiSDKOptions{
+		lib.DisableUpdateCheck(),
 	}
 
-	ne, err := nuclei.NewNucleiEngine(options...)
+	// 2. Define Template Sources
+	templateSources := lib.TemplateSources{}
+	if len(templateIDs) == 0 {
+		files, err := os.ReadDir(s.TemplatesDir)
+		if err != nil {
+			s.console.Log("Failed to read templates directory %s: %v", s.TemplatesDir, err)
+			return cache.ScanResult{}, err
+		}
+		var templatePaths []string
+		for _, file := range files {
+			if !file.IsDir() && (strings.HasSuffix(file.Name(), ".yaml") || strings.HasSuffix(file.Name(), ".yml")) {
+				templatePaths = append(templatePaths, filepath.Join(s.TemplatesDir, file.Name()))
+			}
+		}
+		if len(templatePaths) == 0 {
+			s.console.Log("No templates found in directory: %s", s.TemplatesDir)
+			return cache.ScanResult{}, fmt.Errorf("no templates found in %s", s.TemplatesDir)
+		}
+		templateSources.Templates = templatePaths
+	} else {
+		// Resolve template IDs to full paths
+		var fullPathTemplates []string
+		for _, tpl := range templateIDs {
+			fullPathTemplates = append(fullPathTemplates, filepath.Join(s.TemplatesDir, tpl))
+		}
+		templateSources.Templates = fullPathTemplates
+	}
+	options = append(options, lib.WithTemplatesOrWorkflows(templateSources))
+
+	// 3. Define Template Filters
+	if severityFilter != "" || protocolFilter != "" {
+		filters := lib.TemplateFilters{
+			Severity:      severityFilter,
+			ProtocolTypes: protocolFilter,
+		}
+		options = append(options, lib.WithTemplateFilters(filters))
+	}
+
+
+	ne, err := lib.NewNucleiEngine(options...)
+
 	if err != nil {
 		s.console.Log("Failed to create nuclei engine: %v", err)
 		return cache.ScanResult{}, err
 	}
 	defer ne.Close()
 
-	ne.LoadTargets([]string{target}, true)
 
 	if err := ne.LoadAllTemplates(); err != nil {
 		s.console.Log("Failed to load templates: %v", err)
@@ -97,6 +123,14 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
+
+	// 4. Load targets
+	ne.LoadTargets([]string{target}, false) // Don't probe non-HTTP targets
+
+	// 5. Execute scan with a callback to collect results
+	var findings []*output.ResultEvent
+	var findingsMutex sync.Mutex
+
 	callback := func(event *output.ResultEvent) {
 		findingsMutex.Lock()
 		defer findingsMutex.Unlock()
@@ -104,11 +138,13 @@ func (s *ScannerService) Scan(target string, severity string, protocols string, 
 		s.console.Log("Found vulnerability: %s (%s) on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Host)
 	}
 
-	err = ne.ExecuteWithCallback(callback)
-	if err != nil {
+
+	if err := ne.ExecuteWithCallback(callback); err != nil {
+
 		s.console.Log("Scan failed: %v", err)
 		return cache.ScanResult{}, err
 	}
+
 
 	result := cache.ScanResult{
 		Target:   target,
@@ -137,43 +173,63 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 
 	s.console.Log("Starting new thread-safe scan for target: %s", target)
 
-	options := []nuclei.NucleiSDKOptions{
-		nuclei.DisableUpdateCheck(),
-	}
-	if severity != "" || protocols != "" || len(templateIDs) > 0 {
-		filters := nuclei.TemplateFilters{}
 
-		if severity != "" {
-			filters.Severity = severity
-		}
+	// --- Start of Nuclei Lib integration ---
 
-		if protocols != "" {
-			protocolsList := strings.Split(protocols, ",")
-			var validProtocols []string
-			for _, p := range protocolsList {
-				p = strings.TrimSpace(p)
-				if p != "https" {
-					validProtocols = append(validProtocols, p)
-				}
-			}
-			if len(validProtocols) > 0 {
-				filters.ProtocolTypes = strings.Join(validProtocols, ",")
-			}
-		}
-
-		if len(templateIDs) > 0 {
-			filters.IDs = templateIDs
-		}
-
-		options = append(options, nuclei.WithTemplateFilters(filters))
+	// 1. Create Nuclei Engine with options
+	options := []lib.NucleiSDKOptions{
+		lib.DisableUpdateCheck(),
 	}
 
-	ne, err := nuclei.NewThreadSafeNucleiEngineCtx(ctx, options...)
+
+	// 2. Define Template Sources
+	templateSources := lib.TemplateSources{}
+	if len(templateIDs) == 0 {
+		files, err := os.ReadDir(s.TemplatesDir)
+		if err != nil {
+			s.console.Log("Failed to read templates directory %s: %v", s.TemplatesDir, err)
+			return cache.ScanResult{}, err
+		}
+		var templatePaths []string
+		for _, file := range files {
+			if !file.IsDir() && (strings.HasSuffix(file.Name(), ".yaml") || strings.HasSuffix(file.Name(), ".yml")) {
+				templatePaths = append(templatePaths, filepath.Join(s.TemplatesDir, file.Name()))
+			}
+		}
+		if len(templatePaths) == 0 {
+			s.console.Log("No templates found in directory: %s", s.TemplatesDir)
+			return cache.ScanResult{}, fmt.Errorf("no templates found in %s", s.TemplatesDir)
+		}
+		templateSources.Templates = templatePaths
+	} else {
+		// Resolve template IDs to full paths
+		var fullPathTemplates []string
+		for _, tpl := range templateIDs {
+			fullPathTemplates = append(fullPathTemplates, filepath.Join(s.TemplatesDir, tpl))
+		}
+		templateSources.Templates = fullPathTemplates
+	}
+	options = append(options, lib.WithTemplatesOrWorkflows(templateSources))
+
+	// 3. Define Template Filters
+	if severity != "" || protocols != "" {
+		filters := lib.TemplateFilters{
+			Severity:      severity,
+			ProtocolTypes: protocols,
+		}
+		options = append(options, lib.WithTemplateFilters(filters))
+	}
+
+
+	// Create a new thread-safe nuclei engine.
+	ne, err := lib.NewThreadSafeNucleiEngineCtx(ctx, options...)
+
 	if err != nil {
 		s.console.Log("Failed to create thread-safe nuclei engine: %v", err)
 		return cache.ScanResult{}, err
 	}
 	defer ne.Close()
+
 
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
@@ -184,11 +240,13 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 		s.console.Log("Found vulnerability: %s (%s) on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Host)
 	})
 
-	err = ne.ExecuteNucleiWithOptsCtx(ctx, []string{target}, options...)
-	if err != nil {
+
+	// 5. Execute scan
+	if err := ne.ExecuteNucleiWithOptsCtx(ctx, []string{target}, options...); err != nil {
 		s.console.Log("Thread-safe scan failed: %v", err)
 		return cache.ScanResult{}, err
 	}
+
 
 	result := cache.ScanResult{
 		Target:   target,
@@ -203,71 +261,52 @@ func (s *ScannerService) ThreadSafeScan(ctx context.Context, target string, seve
 	return result, nil
 }
 
-// BasicScan performs a simple nuclei scan without requiring template IDs
+// BasicScan performs a simple nuclei scan using the default basic-test.yaml template.
 func (s *ScannerService) BasicScan(target string) (cache.ScanResult, error) {
 	cacheKey := fmt.Sprintf("basic:%s", target)
 
-	if result, found := s.cache.Get(cacheKey); found {
-		s.console.Log("Returning cached basic scan result for %s (%d findings)", target, len(result.Findings))
-		return result, nil
+
+	// Check cache first if enabled
+	if s.cache != nil {
+		if result, found := s.cache.Get(cacheKey); found {
+			s.console.Log("Returning cached basic scan result for %s (%d findings)", target, len(result.Findings))
+			return result, nil
+		}
 	}
 
 	s.console.Log("Starting new basic scan for target: %s", target)
 
-	templatesDir, err := filepath.Abs("./templates")
-	if err != nil {
-		s.console.Log("Failed to get absolute path for templates directory: %v", err)
-		return cache.ScanResult{}, err
-	}
 
-	if _, err := os.Stat(templatesDir); os.IsNotExist(err) {
-		s.console.Log("Creating templates directory: %s", templatesDir)
-		if err := os.MkdirAll(templatesDir, 0755); err != nil {
-			s.console.Log("Failed to create templates directory: %v", err)
-			return cache.ScanResult{}, err
-		}
-	}
+	// Define the path to the basic test template using the configured templates directory
+	basicTemplatePath := filepath.Join(s.TemplatesDir, "basic-test.yaml")
 
-	basicTemplatePath := filepath.Join(templatesDir, "basic-test.yaml")
+	// Verify the basic template file exists
 	if _, err := os.Stat(basicTemplatePath); os.IsNotExist(err) {
-		basicTemplate := `id: basic-test
-info:
-  name: Basic Test Template
-  author: MCP
-  severity: info
-  description: Basic test template for nuclei
-
-requests:
-  - method: GET
-    path:
-      - "{{BaseURL}}"
-    matchers:
-      - type: status
-        status:
-          - 200
-`
-		s.console.Log("Creating basic template: %s", basicTemplatePath)
-		if err := os.WriteFile(basicTemplatePath, []byte(basicTemplate), 0644); err != nil {
-			s.console.Log("Failed to write basic template: %v", err)
-			return cache.ScanResult{}, err
-		}
+		s.console.Log("Basic test template not found at %s", basicTemplatePath)
+		return cache.ScanResult{}, fmt.Errorf("basic test template not found: %s", basicTemplatePath)
 	}
-	opts := []nuclei.NucleiSDKOptions{
-		nuclei.WithTemplateFilters(nuclei.TemplateFilters{
-			IncludeTags: []string{"basic-test"},
-			IDs:         []string{"basic-test"},
+
+	// Create nuclei options, explicitly loading the basic test template
+	opts := []lib.NucleiSDKOptions{
+		lib.WithTemplatesOrWorkflows(lib.TemplateSources{
+			Templates: []string{basicTemplatePath},
 		}),
-		nuclei.DisableUpdateCheck(),
+		lib.DisableUpdateCheck(),
 	}
 
-	ne, err := nuclei.NewNucleiEngine(opts...)
+
+	// Create a new nuclei engine with our options
+	ne, err := lib.NewNucleiEngine(opts...)
+
 	if err != nil {
 		s.console.Log("Failed to create nuclei engine: %v", err)
 		return cache.ScanResult{}, err
 	}
 	defer ne.Close()
 
-	ne.LoadTargets([]string{target}, true)
+	// Load targets
+	ne.LoadTargets([]string{target}, true) // Probe for HTTP targets
+
 
 	var findings []*output.ResultEvent
 	var findingsMutex sync.Mutex
@@ -278,8 +317,10 @@ requests:
 		s.console.Log("Found vulnerability: %s (%s) on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Host)
 	}
 
-	err = ne.ExecuteWithCallback(callback)
-	if err != nil {
+
+	// Execute scan with callback
+	if err := ne.ExecuteWithCallback(callback); err != nil {
+
 		s.console.Log("Basic scan failed: %v", err)
 		return cache.ScanResult{}, err
 	}
@@ -290,7 +331,11 @@ requests:
 		ScanTime: time.Now(),
 	}
 
-	s.cache.Set(cacheKey, result)
+	// Cache result if successful and cache is enabled
+	if s.cache != nil {
+		s.cache.Set(cacheKey, result)
+	}
+
 
 	s.console.Log("Basic scan completed for %s, found %d vulnerabilities", target, len(findings))
 
