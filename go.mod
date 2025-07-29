@@ -6,6 +6,7 @@ require (
 	github.com/mark3labs/mcp-go v0.32.0
 	github.com/projectdiscovery/nuclei/v3 v3.3.10
 	github.com/spf13/viper v1.20.1
+	github.com/stretchr/testify v1.10.0
 )
 
 require (
@@ -275,6 +276,7 @@ require (
 	github.com/spf13/afero v1.12.0 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
+	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/syndtr/goleveldb v1.0.0 // indirect
 	github.com/therootcompany/xz v1.0.1 // indirect
