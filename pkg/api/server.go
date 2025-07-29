@@ -60,9 +60,11 @@ func NewNucleiMCPServer(service scanner.ScannerService, logger *log.Logger, tm t
 		return HandleBasicScanTool(ctx, request, service, logger)
 	})
 
+
+	// Add vulnerability resource
 	mcpServer.AddResource(mcp.NewResource("vulnerabilities", "Recent Vulnerability Reports"),
 		func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			return HandleVulnerabilityResource(ctx, request, service, logger)
+			return handleVulnerabilityResource(ctx, request, service, logger)
 		})
 
 	mcpServer.AddTool(mcp.NewTool("add_template",
@@ -139,6 +141,7 @@ func HandleNucleiScanTool(
 		return nil, fmt.Errorf("scan failed: %w", err)
 	}
 
+
 	var responseText string
 	if len(result.Findings) == 0 {
 		responseText = fmt.Sprintf("No vulnerabilities found for target: %s", target)
@@ -173,11 +176,13 @@ func HandleBasicScanTool(
 		return nil, fmt.Errorf("invalid or missing target parameter")
 	}
 
+
 	result, err := service.BasicScan(target)
 	if err != nil {
 		logger.Printf("Basic scan failed: %v", err)
 		return nil, err
 	}
+
 
 	type SimplifiedFinding struct {
 		Name        string `json:"name"`
@@ -196,12 +201,14 @@ func HandleBasicScanTool(
 		})
 	}
 
+
 	response := map[string]interface{}{
 		"target":         result.Target,
 		"scan_time":      result.ScanTime.Format(time.RFC3339),
 		"findings_count": len(result.Findings),
 		"findings":       simplifiedFindings,
 	}
+
 
 	responseJSON, err := json.Marshal(response)
 	if err != nil {
@@ -227,6 +234,8 @@ func HandleVulnerabilityResource(
 			"scan_time": result.ScanTime.Format(time.RFC3339),
 			"findings":  len(result.Findings),
 		}
+
+
 
 		if len(result.Findings) > 0 {
 			var sampleFindings []map[string]string

@@ -15,6 +15,13 @@ type ScanResult struct {
 	Findings []*output.ResultEvent `json:"findings"`
 }
 
+// ResultCacheInterface is an interface that defines the cache operations
+type ResultCacheInterface interface {
+	Get(key string) (ScanResult, bool)
+	Set(key string, result ScanResult)
+	GetAll() []ScanResult
+}
+
 // ResultCache caches scan results
 type ResultCache struct {
 	cache  map[string]ScanResult
@@ -22,6 +29,15 @@ type ResultCache struct {
 	lock   sync.RWMutex
 	logger *log.Logger
 }
+
+// NoopCache is a cache that does nothing.
+type NoopCache struct{}
+
+// Ensure ResultCache implements ResultCacheInterface
+var _ ResultCacheInterface = (*ResultCache)(nil)
+
+// Ensure NoopCache implements ResultCacheInterface
+var _ ResultCacheInterface = (*NoopCache)(nil)
 
 // NewResultCache creates a new result cache
 func NewResultCache(expiry time.Duration, logger *log.Logger) *ResultCache {
@@ -71,4 +87,22 @@ func (c *ResultCache) GetAll() []ScanResult {
 		results = append(results, result)
 	}
 	return results
+}
+
+// NewNoopCache creates a new no-op cache.
+func NewNoopCache() *NoopCache {
+	return &NoopCache{}
+}
+
+// Get always returns nothing for the no-op cache.
+func (c *NoopCache) Get(key string) (ScanResult, bool) {
+	return ScanResult{}, false
+}
+
+// Set does nothing for the no-op cache.
+func (c *NoopCache) Set(key string, result ScanResult) {}
+
+// GetAll returns an empty slice for the no-op cache.
+func (c *NoopCache) GetAll() []ScanResult {
+	return nil
 }

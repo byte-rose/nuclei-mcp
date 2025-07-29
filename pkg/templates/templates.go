@@ -2,7 +2,6 @@ package templates
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -30,12 +29,14 @@ func NewTemplateManager(dir string) (TemplateManager, error) {
 // AddTemplate saves a new template to the templates directory.
 func (tm *templateManagerImpl) AddTemplate(name string, content []byte) error {
 	path := filepath.Join(tm.Dir, name)
-	return ioutil.WriteFile(path, content, 0644)
+	return os.WriteFile(path, content, 0644)
 }
 
 // ListTemplates returns a list of all available template names.
-func (tm *templateManagerImpl) ListTemplates() ([]string, error) {
-	files, err := ioutil.ReadDir(tm.Dir)
+
+func (tm *TemplateManager) ListTemplates() ([]string, error) {
+	files, err := os.ReadDir(tm.Dir)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to read templates directory: %w", err)
 	}
@@ -52,5 +53,5 @@ func (tm *templateManagerImpl) ListTemplates() ([]string, error) {
 // GetTemplate retrieves the content of a specific template.
 func (tm *templateManagerImpl) GetTemplate(name string) ([]byte, error) {
 	path := filepath.Join(tm.Dir, name)
-	return ioutil.ReadFile(path)
+	return os.ReadFile(path)
 }
